@@ -8,7 +8,8 @@
  * Wiring:   DIN->D7(GPIO13), CS->D6(GPIO12), CLK->D5(GPIO14)
  * 
  * Asset selection via WiFiManager custom parameter ("XAU" or "XAG").
- * Open config portal by double-resetting the board within 5 seconds.
+ * Config portal opens automatically if no WiFi credentials are saved,
+ * or if the API fails 5 consecutive times (~25 minutes of failures).
  */
 
 #include <Arduino.h>
@@ -66,6 +67,9 @@ unsigned long lastFetchTime = 0;
 // Current asset mode (persisted in EEPROM)
 AssetMode currentMode = ASSET_GOLD;
 
+// Consecutive API fetch failure counter (reset on success)
+int consecutiveFailures = 0;
+
 // Built-in LED for status indication (active LOW on D1 Mini)
 #define LED_BUILTIN_PIN 2  // GPIO2 / D4
 
@@ -103,61 +107,14 @@ AssetMode loadModeFromEEPROM() {
 }
 
 /* ============================================================
- * DOUBLE-RESET DETECTION (opens config portal on demand)
- * 
- * Stores the previous boot time in EEPROM at address 1.
- * If current boot occurs within DOUBLE_RESET_WINDOW_MS of the
- * previous boot, we open the WiFiManager config portal.
+ * CONSECUTIVE FAILURE TRACKING (auto-open portal on persistent failure)
+ *
+ * Counts consecutive failed API fetches. After MAX_FETCH_FAILURES
+ * failures (spanning ~5 minutes), auto-opens the WiFi config portal
+ * so the user can reconfigure network/asset settings.
  * ============================================================ */
 
-#define DOUBLE_RESET_ADDR       1   // Address for last-boot timestamp (low byte)
-#define DOUBLE_RESET_WINDOW_MS  5000  // 5 seconds window
-
-bool detectDoubleReset() {
-    unsigned long now = millis();
-    
-    // Read the stored boot tick from previous session
-    uint8_t savedTickLow  = EEPROM.read(DOUBLE_RESET_ADDR);
-    uint8_t savedTickHigh = EEPROM.read(DOUBLE_RESET_ADDR + 1);
-    uint16_t savedBootTick = ((uint16_t)savedTickHigh << 8) | savedTickLow;
-    
-    // Current boot tick (millis / 1000, truncated to fit in 16 bits)
-    uint16_t currentBootTick = (uint16_t)(now / 1000);
-    
-    // Calculate delta accounting for millis() wraparound (~49 days)
-    int16_t delta = (int16_t)(currentBootTick - savedBootTick);
-    
-    bool isDoubleReset = false;
-    
-    if (savedTickLow == 0xFF && savedTickHigh == 0xFF) {
-        // First boot ever — EEPROM uninitialized
-        Serial.println(F("[BOOT] First boot (EEPROM uninitialized)"));
-    } else if (delta >= 0 && delta <= (DOUBLE_RESET_WINDOW_MS / 1000)) {
-        // Both boots within the time window.
-        // delta == 0 means both in same second — strongest signal.
-        Serial.printf("[BOOT] Double-reset detected! Delta: %d seconds\n", delta);
-        isDoubleReset = true;
-    } else if (delta < -(32768 - (DOUBLE_RESET_WINDOW_MS / 1000))) {
-        // millis() wrapped around (~49 days). If the saved tick is just past
-        // the wrap boundary, delta wraps negative but is still within window.
-        int16_t wrappedDelta = delta + 32768;
-        if (wrappedDelta <= (DOUBLE_RESET_WINDOW_MS / 1000)) {
-            Serial.printf("[BOOT] Double-reset detected (wrap)! Delta: %d seconds\n", wrappedDelta);
-            isDoubleReset = true;
-        } else {
-            Serial.printf("[BOOT] Normal boot. Saved tick too old.\n");
-        }
-    } else {
-        Serial.printf("[BOOT] Normal boot. Delta: %d seconds\n", delta);
-    }
-    
-    // Save current boot tick for next time
-    EEPROM.write(DOUBLE_RESET_ADDR,  (uint8_t)(currentBootTick & 0xFF));
-    EEPROM.write(DOUBLE_RESET_ADDR + 1, (uint8_t)((currentBootTick >> 8) & 0xFF));
-    EEPROM.commit();
-    
-    return isDoubleReset;
-}
+#define MAX_FETCH_FAILURES  5   // Open portal after 5 consecutive failures
 
 /* ============================================================
  * DISPLAY FUNCTIONS
@@ -433,7 +390,7 @@ const char* PARAM_ASSET_HTML = R"rawliteral(
 </script>
 )rawliteral";
 
-void setupWiFi(bool forcePortal = false) {
+void setupWiFi() {
     Serial.println(F("[WIFI] Starting WiFiManager..."));
     
     // Built-in LED as status indicator during setup
@@ -442,7 +399,7 @@ void setupWiFi(bool forcePortal = false) {
     
     WiFiManager wm;
     wm.setDebugOutput(true);
-    wm.setConnectTimeout(30);
+    wm.setConnectTimeout(15);
     wm.setConfigPortalTimeout(180);  // Auto-close after 3 minutes if no connection
     
     String portalName = "GoldPrice-Setup";
@@ -473,7 +430,7 @@ void setupWiFi(bool forcePortal = false) {
     
     wm.addParameter(&paramAsset);
     
-    Serial.printf("[WIFI] Starting captive portal: %s\n", portalName.c_str());
+    Serial.printf("[WIFI] Connecting to WiFi (portal: %s)...\n", portalName.c_str());
     
     // Blink LED while in setup mode
     wm.setAPCallback([](WiFiManager* wm) {
@@ -481,36 +438,23 @@ void setupWiFi(bool forcePortal = false) {
                       WiFi.softAPIP().toString().c_str());
     });
     
-    // If forcePortal is true, skip auto-connect and go straight to config portal
-    if (forcePortal) {
-        Serial.println(F("[WIFI] Forced config portal mode"));
-        wm.setConfigPortalTimeout(300);  // Give more time when manually opened
+    // autoConnect: tries saved credentials first, opens portal if none exist or connection fails
+    if (!wm.autoConnect(portalName.c_str())) {
+        Serial.println(F("[WIFI] Failed to connect and hit timeout. Rebooting..."));
         
-        if (!wm.startConfigPortal(portalName.c_str(), "hermes123")) {
-            Serial.println(F("[WIFI] Config portal timed out. Rebooting..."));
-            ESP.restart();
-            delay(500);
-            return;
+        // Flash LED rapidly to indicate failure
+        for (int i = 0; i < 10; i++) {
+            digitalWrite(LED_BUILTIN_PIN, LOW);
+            delay(50);
+            digitalWrite(LED_BUILTIN_PIN, HIGH);
+            delay(50);
         }
-    } else {
-        // Connect to saved credentials or show captive portal if none exist
-        if (!wm.autoConnect(portalName.c_str())) {
-            Serial.println(F("[WIFI] Failed to connect and hit timeout. Rebooting..."));
-            
-            // Flash LED rapidly to indicate failure
-            for (int i = 0; i < 10; i++) {
-                digitalWrite(LED_BUILTIN_PIN, LOW);
-                delay(50);
-                digitalWrite(LED_BUILTIN_PIN, HIGH);
-                delay(50);
-            }
-            
-            // Reset WiFiManager preferences and try again
-            wm.resetSettings();
-            ESP.restart();
-            delay(500);
-            return;
-        }
+        
+        // Reset WiFiManager preferences and try again
+        wm.resetSettings();
+        ESP.restart();
+        delay(500);
+        return;
     }
     
     /* ---- Validate and persist asset parameter ---- */
@@ -560,14 +504,11 @@ void setup() {
     Serial.println(F("  ESP8266 Gold/Silver Price Display"));
     Serial.println(F("========================================\n"));
     
-    // Initialize EEPROM first (needed for double-reset detection)
+    // Initialize EEPROM first (needed for mode persistence)
     EEPROM.begin(EEPROM_SIZE);
     
     // Load persisted asset mode from EEPROM
     currentMode = loadModeFromEEPROM();
-    
-    // Check for double-reset to open config portal
-    bool forcePortal = detectDoubleReset();
     
     // Initialize display first (works without WiFi)
     displayInit();
@@ -580,8 +521,8 @@ void setup() {
     }
     displayClear();
     
-    // Connect to WiFi (with optional forced config portal)
-    setupWiFi(forcePortal);
+    // Connect to WiFi (autoConnect: saved creds first, portal if needed)
+    setupWiFi();
     
     // Try initial fetch for the selected asset
     if (fetchAssetPrice(currentMode)) {
@@ -619,19 +560,42 @@ void loop() {
             int decimals = (currentMode == ASSET_GOLD) ? 2 : 3;
             displayPrice(lastPrice, decimals);
             
+            // Reset consecutive failure counter on success
+            consecutiveFailures = 0;
+            
             // Brief LED flash to indicate successful update
             digitalWrite(LED_BUILTIN_PIN, LOW);   // ON
             delay(200);
             digitalWrite(LED_BUILTIN_PIN, HIGH);  // OFF
             
         } else {
-            Serial.println(F("[LOOP] Fetch failed. Keeping last known price."));
+            consecutiveFailures++;
+            Serial.printf("[LOOP] Fetch failed (%d/%d consecutive failures)\n", 
+                          consecutiveFailures, MAX_FETCH_FAILURES);
             
             if (!hasValidPrice) {
                 // Never had a valid price: show error indicator
                 displayErrorIndicator();
             }
             // If we have a previous price, just keep displaying it (no change needed)
+            
+            // After too many consecutive failures, open config portal for reconfiguration
+            if (consecutiveFailures >= MAX_FETCH_FAILURES) {
+                Serial.println(F("[LOOP] Too many consecutive failures, opening config portal..."));
+                setupWiFi();
+                
+                // Reset counter after portal and try fetching again
+                consecutiveFailures = 0;
+                
+                if (fetchAssetPrice(currentMode)) {
+                    int decimals = (currentMode == ASSET_GOLD) ? 2 : 3;
+                    displayPrice(lastPrice, decimals);
+                } else {
+                    if (!hasValidPrice) {
+                        displayErrorIndicator();
+                    }
+                }
+            }
         }
     }
     

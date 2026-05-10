@@ -8,7 +8,7 @@ A real-time commodity price display built on an ESP8266 D1 Mini, showing live go
 - **Dual asset support** — toggle between Gold (XAU) and Silver (XAG)
 - **Persistent settings** — asset selection survives reboots (EEPROM)
 - **Easy configuration** — WiFiManager captive portal with asset dropdown
-- **No wiring needed for config** — double-reset the board to open the config portal
+- **Automatic setup** — config portal opens on first boot and when the network is unreachable
 
 ## Hardware
 
@@ -71,18 +71,18 @@ pio device monitor
 
 ### Changing Asset (Gold / Silver)
 
-Double-reset the board within 5 seconds to open the config portal:
+To reconfigure the asset or WiFi settings, the config portal opens automatically if the board cannot connect to your saved network. To force it open:
 
-1. Press the D1 Mini RESET button
-2. Press RESET again within 5 seconds
-3. Connect to the `GoldPrice-Setup` WiFi AP
-4. Change your asset selection in the portal and save
+1. Disable or rename your WiFi network so the board cannot connect
+2. Wait for the board to detect the connection failure (config portal opens automatically)
+3. Connect to the `GoldPrice-Setup` WiFi AP from your phone or laptop
+4. Change your settings in the portal and save
 
-The config portal password is `hermes123`.
+Alternatively, after 5 consecutive API fetch failures (~25 minutes), the board will automatically open the config portal for reconfiguration.
 
 ### Changing WiFi Network
 
-Same double-reset procedure — the captive portal shows your WiFi credentials fields where you can enter a new network.
+The config portal opens automatically when the saved network is unavailable. Simply connect to the `GoldPrice-Setup` WiFi AP and enter your new network credentials.
 
 ### Serial Output
 
@@ -91,7 +91,6 @@ The board logs all activity to serial at 115200 baud, including:
 - API fetch results
 - Display updates
 - EEPROM read/write operations
-- Double-reset detection
 
 ## Technical Details
 
@@ -101,8 +100,9 @@ The board logs all activity to serial at 115200 baud, including:
 | Refresh interval | 5 minutes |
 | HTTP timeout | 10 seconds |
 | Display brightness | 8/15 |
-| EEPROM usage | 4 bytes (mode + boot tick) |
-| Config portal timeout | 3 minutes (auto), 5 minutes (forced) |
+| EEPROM usage | 1 byte (mode only) |
+| Config portal timeout | 3 minutes |
+| Auto-portal trigger | 5 consecutive fetch failures |
 
 ### Libraries
 

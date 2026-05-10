@@ -1,0 +1,18 @@
+# PlatformIO build artifacts
+.gitattributes
+.gitignore
+.vscode/
+.platformio/
+*.o
+*.hex
+*.bin
+
+# Recovery notes (local dev tracking)
+RECOVERY.md
+
+# IDE
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db

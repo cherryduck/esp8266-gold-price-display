@@ -35,7 +35,7 @@ A real-time commodity price display built on an ESP8266 D1 Mini, showing live go
 - [PlatformIO](https://platformio.org) (CLI or VS Code extension)
 - USB cable connected to D1 Mini
 
-### First Boot
+### Build & Flash
 
 1. Clone this repository:
    ```bash
@@ -43,25 +43,23 @@ A real-time commodity price display built on an ESP8266 D1 Mini, showing live go
    cd esp8266-gold-price-display
    ```
 
-2. Add your WiFi credentials and API key:
-   - Connect the board via USB
-   - Power it on — the display shows `88888888` briefly, then enters setup mode
-   - Connect to the `GoldPrice-Setup` WiFi access point from your phone/laptop
-   - Enter your WiFi credentials
-   - Select your preferred asset (Gold or Silver) from the dropdown
-   - Save — the board reconnects and starts displaying prices
-
-### Build & Flash
-
-```bash
-# Build only
-pio run
-
-# Build and flash
-pio run --target upload
-```
+2. Connect the D1 Mini via USB, then build and flash:
+   ```bash
+   pio run --target upload
+   ```
 
 > **Note:** If your serial port is not `/dev/ttyUSB0`, update `upload_port` and `monitor_port` in `platformio.ini`.
+
+### First Boot
+
+After flashing, the board boots and the display briefly shows `88888888` as a test pattern, then enters WiFi setup mode:
+
+1. Connect to the `GoldPrice-Setup` WiFi access point from your phone or laptop
+2. Enter your WiFi credentials on the captive portal page
+3. Select your preferred asset (Gold or Silver) from the dropdown
+4. Save — the board connects to your network and starts displaying prices
+
+No API key is needed. The firmware uses the free tier of [gold-api.com](https://www.gold-api.com).
 
 ### Serial Monitoring
 
